@@ -1,4 +1,4 @@
-import os, json, re, logging, tempfile, difflib, asyncio
+import os, json, re, logging, tempfile, difflib
 from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 
 BOT_TOKEN  = os.environ["TELEGRAM_BOT_TOKEN"]
 OPENAI_KEY = os.environ["OPENAI_API_KEY"]
-CONTACTS_FILE = Path(__file__).parent / "contacts.json"
+CONTACTS_FILE = Path("/tmp/contacts.json")
 openai_client = openai.OpenAI(api_key=OPENAI_KEY)
 
 def load_contacts():
@@ -240,12 +240,8 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await do_send(update, ctx, contact_name, message)
 
 def main():
-    # Fix for Python 3.14 event loop issue
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    PORT = int(os.environ.get("PORT", 8443))
+    WEBHOOK_URL = os.environ["RENDER_EXTERNAL_URL"]
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start",         cmd_start))
@@ -261,7 +257,13 @@ def main():
     app.add_handler(MessageHandler(filters.VOICE,   handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     log.info("Bot started ✅")
-    app.run_polling(drop_pending_updates=True)
+
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        webhook_url=f"{WEBHOOK_URL}/webhook",
+        url_path="webhook",
+    )
 
 if __name__ == "__main__":
     main()
