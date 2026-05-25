@@ -1,19 +1,20 @@
 import os, json, re, logging, tempfile, difflib, asyncio
 from pathlib import Path
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, MessageHandler, CommandHandler,
-    ContextTypes, CallbackQueryHandler, filters
-)
+from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 from groq import Groq
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 log = logging.getLogger(__name__)
 
-BOT_TOKEN  = os.environ["TELEGRAM_BOT_TOKEN"]
-GROQ_KEY   = os.environ["GROQ_API_KEY"]
+API_ID        = int(os.environ["TELEGRAM_API_ID"])
+API_HASH      = os.environ["TELEGRAM_API_HASH"]
+SESSION       = os.environ["TELEGRAM_SESSION"]
+GROQ_KEY      = os.environ["GROQ_API_KEY"]
 CONTACTS_FILE = Path("/tmp/contacts.json")
+
 groq_client = Groq(api_key=GROQ_KEY)
+client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
 
 def load_contacts():
     if CONTACTS_FILE.exists():
@@ -66,209 +67,131 @@ def parse_send(text):
             return m.group("name").capitalize(), m.group("msg").strip()
     return None, None
 
-async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    contacts = load_contacts()
-    already_saved = any(str(c.get("id")) == str(user.id) for c in contacts.values())
-    if not already_saved:
-        key = user.first_name.capitalize()
-        base = key
-        i = 2
-        while key in contacts:
-            key = f"{base}{i}"
-            i += 1
-        contacts[key] = {"id": user.id, "username": user.username or ""}
-        save_contacts(contacts)
-    await update.message.reply_text(
-        f"Բարև <b>{user.first_name}</b>! 👋\n\n"
-        f"🆔 Ձեր ID: <code>{user.id}</code>\n\n"
-        "🎙️ Ուղարկեք ձայնային հաղորդագրություն հայերեն, ռուսերեն կամ անգլերեն:\n\n"
-        "<b>Ձայնային հրամաններ:</b>\n"
-        "• «Ani-ին գրիր Okay»\n"
-        "• «Aram-ին ուղարկիր Բարև»\n"
-        "• «Write Sona I'm running late»\n\n"
-        "<b>Հրամաններ:</b>\n"
-        "/contacts — բոլոր կոնտակտները\n"
-        "/add Ani 123456789 — ավելացնել\n"
-        "/remove Ani — ջնջել\n"
-        "/myid — ձեր ID-ն\n"
-        "/invite — հրավիրել ընկերոջը",
-        parse_mode="HTML"
-    )
-
-async def cmd_myid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    u = update.effective_user
-    await update.message.reply_text(
-        f"👤 <b>{u.first_name}</b>\n"
-        f"🆔 ID: <code>{u.id}</code>\n"
-        f"📛 Username: {'@' + u.username if u.username else '(none)'}",
-        parse_mode="HTML"
-    )
-
-async def cmd_invite(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    me = await ctx.bot.get_me()
-    link = f"https://t.me/{me.username}"
-    await update.message.reply_text(
-        f"📨 Ուղարկեք այս հղումը ձեր ընկերոջը:\n\n<b>{link}</b>\n\n"
-        "Երբ նա սեղմի Start, ավտոմատ կավելացվի ձեր կոնտակտներին ✅",
-        parse_mode="HTML"
-    )
-
-async def cmd_contacts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_contacts(event):
     contacts = load_contacts()
     if not contacts:
-        await update.message.reply_text(
+        await event.reply(
             "Կոնտակտներ չկան:\n\n"
-            "1️⃣ /invite — ուղարկեք հղումն ընկերոջը\n"
-            "2️⃣ /add Անուն ID — ձեռքով ավելացնել"
+            "/add Անուն ID — ավելացնել"
         )
         return
     lines = []
     for i, (name, info) in enumerate(sorted(contacts.items()), 1):
         uname = f"  @{info['username']}" if info.get("username") else ""
-        lines.append(f"{i}. <b>{name}</b>{uname}  <code>{info['id']}</code>")
-    await update.message.reply_text(
-        f"<b>📋 Կոնտակտներ ({len(contacts)}):</b>\n\n" + "\n".join(lines),
-        parse_mode="HTML"
+        lines.append(f"{i}. {name}{uname}  {info['id']}")
+    await event.reply(
+        f"📋 Կոնտակտներ ({len(contacts)}):\n\n" + "\n".join(lines)
     )
 
-async def cmd_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    args = ctx.args
-    if len(args) < 2 or not args[-1].lstrip("-").isdigit():
-        await update.message.reply_text(
+async def cmd_add(event):
+    parts = event.raw_text.strip().split()
+    if len(parts) < 3 or not parts[-1].lstrip("-").isdigit():
+        await event.reply(
             "Օգտագործում: /add Անուն TelegramID\n"
             "Օրինակ: /add Ani 123456789"
         )
         return
-    uid  = int(args[-1])
-    name = " ".join(args[:-1]).capitalize()
+    uid  = int(parts[-1])
+    name = " ".join(parts[1:-1]).capitalize()
     contacts = load_contacts()
     contacts[name] = {"id": uid, "username": ""}
     save_contacts(contacts)
-    await update.message.reply_text(
-        f"✅ <b>{name}</b> ավելացված է (ID: <code>{uid}</code>)", parse_mode="HTML"
-    )
+    await event.reply(f"✅ {name} ավելացված է (ID: {uid})")
 
-async def cmd_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args:
-        await update.message.reply_text("Օգտագործում: /remove Անուն")
+async def cmd_remove(event):
+    parts = event.raw_text.strip().split()
+    if len(parts) < 2:
+        await event.reply("Օգտագործում: /remove Անուն")
         return
-    name = " ".join(ctx.args).capitalize()
+    name = " ".join(parts[1:]).capitalize()
     contacts = load_contacts()
     matched, _ = find_contact(name, contacts)
     if matched:
         del contacts[matched]
         save_contacts(contacts)
-        await update.message.reply_text(f"🗑️ <b>{matched}</b> ջնջված է:", parse_mode="HTML")
+        await event.reply(f"🗑️ {matched} ջնջված է")
     else:
-        await update.message.reply_text(f"❌ «{name}» չգտնվեց կոնտակտներում:")
+        await event.reply(f"❌ «{name}» չգտնվեց կոնտակտներում")
 
-async def do_send(update: Update, ctx, contact_name, message):
+async def cmd_help(event):
+    await event.reply(
+        "🤖 Հրամաններ:\n\n"
+        "/contacts — բոլոր կոնտակտները\n"
+        "/add Ani 123456789 — ավելացնել\n"
+        "/remove Ani — ջնջել\n"
+        "/help — օգնություն\n\n"
+        "📨 Ուղարկելու համար:\n"
+        "• Write Ani Hello\n"
+        "• Ani-ին գրիր Բարև\n"
+        "• Կամ ձայնային հաղորդագրություն"
+    )
+
+async def do_send(event, contact_name, message):
     contacts = load_contacts()
     matched_name, entry = find_contact(contact_name, contacts)
     if entry is None:
         if not contacts:
-            await update.message.reply_text("❌ Կոնտակտներ չկան: /add Անուն ID")
+            await event.reply("❌ Կոնտակտներ չկան: /add Անուն ID")
             return
-        keyboard = [
-            [InlineKeyboardButton(n, callback_data=f"send|{n}|{message}")]
-            for n in sorted(contacts.keys())
-        ]
-        keyboard.append([InlineKeyboardButton("❌ Չեղարկել", callback_data="cancel")])
-        await update.message.reply_text(
-            f"❓ «{contact_name}» չգտնվեց: Ո՞ւմ ուղարկե՞մ «{message}»-ը:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        lines = "\n".join(f"• {n}" for n in sorted(contacts.keys()))
+        await event.reply(f"❓ «{contact_name}» չգտնվեց:\n\n{lines}")
         return
     try:
-        await ctx.bot.send_message(chat_id=entry["id"], text=message)
-        await update.message.reply_text(
-            f"✅ Ուղարկվեց <b>{matched_name}</b>-ին:\n«{message}»", parse_mode="HTML"
-        )
+        await client.send_message(entry["id"], message)
+        await event.reply(f"✅ Ուղարկվեց {matched_name}-ին:\n«{message}»")
     except Exception as e:
-        await update.message.reply_text(
-            f"⚠️ Չհաջողվեց ուղարկել <b>{matched_name}</b>-ին:\n{e}\n\n"
-            f"Խնդրեք {matched_name}-ին ուղարկի /start բոտին մեկ անգամ:",
-            parse_mode="HTML"
-        )
+        await event.reply(f"⚠️ Չհաջողվեց ուղարկել {matched_name}-ին:\n{e}")
 
-async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    if data == "cancel":
-        await query.edit_message_text("❌ Չեղարկված:")
-        return
-    if data.startswith("send|"):
-        _, name, message = data.split("|", 2)
-        contacts = load_contacts()
-        _, entry = find_contact(name, contacts)
-        if entry:
-            try:
-                await ctx.bot.send_message(chat_id=entry["id"], text=message)
-                await query.edit_message_text(
-                    f"✅ Ուղարկվեց <b>{name}</b>-ին:\n«{message}»", parse_mode="HTML"
-                )
-            except Exception as e:
-                await query.edit_message_text(f"⚠️ Սխալ: {e}")
+async def handle_message(event):
+    if event.raw_text.startswith("/contacts"):
+        await cmd_contacts(event)
+    elif event.raw_text.startswith("/add"):
+        await cmd_add(event)
+    elif event.raw_text.startswith("/remove"):
+        await cmd_remove(event)
+    elif event.raw_text.startswith("/help"):
+        await cmd_help(event)
+    else:
+        contact_name, message = parse_send(event.raw_text)
+        if contact_name:
+            await do_send(event, contact_name, message)
 
-async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    status = await msg.reply_text("🎙️ Ստանում եմ ձայնը...")
-    voice_file = await ctx.bot.get_file(msg.voice.file_id)
+async def handle_voice(event):
     with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
         tmp_path = tmp.name
-    await voice_file.download_to_drive(tmp_path)
+    await client.download_media(event.message, tmp_path)
     try:
-        await status.edit_text("🔄 Ճանաչում եմ ձայնը...")
         text = await transcribe(tmp_path)
-        await status.edit_text(f"📝 Լսեցի:\n<i>{text}</i>", parse_mode="HTML")
+        await event.reply(f"📝 Լսեցի:\n{text}")
         contact_name, message = parse_send(text)
         if contact_name is None:
-            await msg.reply_text(
-                "🤔 Հասկացա ձայնը, բայց ուղարկելու հրաման չտեսա:\n\n"
+            await event.reply(
+                "🤔 Հասկացա ձայնը, բայց հրաման չտեսա:\n\n"
                 "Ասեք, օրինակ:\n• «Ani-ին գրիր Okay»\n• «Write Aram I'm coming»"
             )
             return
-        await do_send(update, ctx, contact_name, message)
+        await do_send(event, contact_name, message)
     except Exception as e:
         log.exception("Voice error")
-        await msg.reply_text(f"⚠️ Սխալ: {e}")
+        await event.reply(f"⚠️ Սխալ: {e}")
     finally:
         os.unlink(tmp_path)
 
-async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    contact_name, message = parse_send(update.message.text)
-    if contact_name:
-        await do_send(update, ctx, contact_name, message)
+async def main():
+    await client.start()
+    log.info("UserBot started ✅ — listening to yourself only")
 
-def main():
-    asyncio.set_event_loop(asyncio.new_event_loop())
+    me = await client.get_me()
+    my_id = me.id
 
-    PORT = int(os.environ.get("PORT", 8443))
-    WEBHOOK_URL = os.environ["RENDER_EXTERNAL_URL"]
+    @client.on(events.NewMessage(from_users=my_id, outgoing=False))
+    async def on_message(event):
+        if event.voice:
+            await handle_voice(event)
+        elif event.raw_text:
+            await handle_message(event)
 
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start",         cmd_start))
-    app.add_handler(CommandHandler("myid",          cmd_myid))
-    app.add_handler(CommandHandler("invite",        cmd_invite))
-    app.add_handler(CommandHandler("contacts",      cmd_contacts))
-    app.add_handler(CommandHandler("add",           cmd_add))
-    app.add_handler(CommandHandler("remove",        cmd_remove))
-    app.add_handler(CommandHandler("add_contact",   cmd_add))
-    app.add_handler(CommandHandler("list_contacts", cmd_contacts))
-    app.add_handler(CommandHandler("del_contact",   cmd_remove))
-    app.add_handler(CallbackQueryHandler(callback_handler))
-    app.add_handler(MessageHandler(filters.VOICE,   handle_voice))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    log.info("Bot started ✅")
-
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        webhook_url=f"{WEBHOOK_URL}/webhook",
-        url_path="webhook",
-    )
+    await client.run_until_disconnected()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
