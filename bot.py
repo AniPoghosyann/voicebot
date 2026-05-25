@@ -1,4 +1,4 @@
-import os, json, re, logging, tempfile, difflib
+import os, json, re, logging, tempfile, difflib, asyncio
 from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -243,6 +243,8 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await do_send(update, ctx, contact_name, message)
 
 def main():
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
     PORT = int(os.environ.get("PORT", 8443))
     WEBHOOK_URL = os.environ["RENDER_EXTERNAL_URL"]
 
