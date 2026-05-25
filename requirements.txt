@@ -1,2 +1,2 @@
-python-telegram-bot[webhooks]==21.6
+telethon
 groq>=0.9.0
