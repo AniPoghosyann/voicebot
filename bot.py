@@ -5,15 +5,15 @@ from telegram.ext import (
     Application, MessageHandler, CommandHandler,
     ContextTypes, CallbackQueryHandler, filters
 )
-import openai
+from groq import Groq
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 log = logging.getLogger(__name__)
 
 BOT_TOKEN  = os.environ["TELEGRAM_BOT_TOKEN"]
-OPENAI_KEY = os.environ["OPENAI_API_KEY"]
+GROQ_KEY   = os.environ["GROQ_API_KEY"]
 CONTACTS_FILE = Path("/tmp/contacts.json")
-openai_client = openai.OpenAI(api_key=OPENAI_KEY)
+groq_client = Groq(api_key=GROQ_KEY)
 
 def load_contacts():
     if CONTACTS_FILE.exists():
@@ -45,8 +45,11 @@ def find_contact(name, contacts):
 
 async def transcribe(ogg_path):
     with open(ogg_path, "rb") as f:
-        result = openai_client.audio.transcriptions.create(
-            model="whisper-1", file=f, language="hy", response_format="text"
+        result = groq_client.audio.transcriptions.create(
+            model="whisper-large-v3",
+            file=f,
+            language="hy",
+            response_format="text"
         )
     return result.strip()
 
