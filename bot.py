@@ -95,11 +95,12 @@ def find_contact(name, contacts):
 async def transcribe(ogg_path):
     with open(ogg_path, "rb") as f:
         result = groq_client.audio.transcriptions.create(
-            model="whisper-large-v3",
+            model="whisper-large-v3-turbo",
             file=f,
-            response_format="text"
+            response_format="verbose_json",
+            prompt="Armenian, English or Russian speech. Names of people."
         )
-    return result.strip()
+    return result.text.strip()
 
 SEND_PATTERNS = [
     r"(?P<name>[\w\u0531-\u0587]+)[- ]?ին\s+(?:գրիր|ուղարկիր|ասա|փոխանցիր)\s+(?P<msg>.+)",
@@ -218,9 +219,11 @@ async def do_send(event, contact_name, message):
         if not contacts:
             await event.reply("❌ Կոնտակտներ չկան: /sync կամ /add Անուն ID")
             return
-        await event.reply(f"❓ «{contact_name}» չգտնվեց: Կոնտակտներից ընտրեք:\n\n" +
+        await event.reply(
+            f"❓ «{contact_name}» չգտնվեց: Ընտրեք կոնտակտ:\n\n" +
             "\n".join(f"{i+1}. {n}" for i, n in enumerate(sorted(contacts.keys()))) +
-            "\n\nՊատասխանեք համարով, օրինակ: 1")
+            "\n\nՊատասխանեք համարով, օրինակ: 1"
+        )
         pending_sends[event.chat_id] = {"contacts": sorted(contacts.keys()), "message": message}
         return
     if isinstance(entry, list):
