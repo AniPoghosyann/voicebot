@@ -2,6 +2,7 @@ import os, json, re, logging, tempfile, difflib, asyncio
 from pathlib import Path
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+from telethon.tl.functions.contacts import GetContactsRequest
 from groq import Groq
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
@@ -67,12 +68,44 @@ def parse_send(text):
             return m.group("name").capitalize(), m.group("msg").strip()
     return None, None
 
+async def cmd_sync(event):
+    await event.reply("🔄 Սինքրոնիզացնում եմ կոնտակտները...")
+    try:
+        result = await client(GetContactsRequest(hash=0))
+        contacts = load_contacts()
+        count = 0
+        for user in result.users:
+            if user.bot:
+                continue
+            name = user.first_name or ""
+            if user.last_name:
+                name += f" {user.last_name}"
+            name = name.strip().capitalize()
+            if not name:
+                continue
+            base = name
+            i = 2
+            while name in contacts and contacts[name]["id"] != user.id:
+                name = f"{base}{i}"
+                i += 1
+            contacts[name] = {
+                "id": user.id,
+                "username": user.username or ""
+            }
+            count += 1
+        save_contacts(contacts)
+        await event.reply(f"✅ {count} կոնտակտ սինքրոնիզացվեց!")
+    except Exception as e:
+        log.exception("Sync error")
+        await event.reply(f"⚠️ Սխալ: {e}")
+
 async def cmd_contacts(event):
     contacts = load_contacts()
     if not contacts:
         await event.reply(
             "Կոնտակտներ չկան:\n\n"
-            "/add Անուն ID — ավելացնել"
+            "/sync — ավտոմատ սինքրոնիզացնել\n"
+            "/add Անուն ID — ձեռքով ավելացնել"
         )
         return
     lines = []
@@ -116,8 +149,9 @@ async def cmd_remove(event):
 async def cmd_help(event):
     await event.reply(
         "🤖 Հրամաններ:\n\n"
+        "/sync — ավտոմատ սինքրոնիզացնել բոլոր կոնտակտները\n"
         "/contacts — բոլոր կոնտակտները\n"
-        "/add Ani 123456789 — ավելացնել\n"
+        "/add Ani 123456789 — ձեռքով ավելացնել\n"
         "/remove Ani — ջնջել\n"
         "/help — օգնություն\n\n"
         "📨 Ուղարկելու համար:\n"
@@ -131,7 +165,7 @@ async def do_send(event, contact_name, message):
     matched_name, entry = find_contact(contact_name, contacts)
     if entry is None:
         if not contacts:
-            await event.reply("❌ Կոնտակտներ չկան: /add Անուն ID")
+            await event.reply("❌ Կոնտակտներ չկան: /sync կամ /add Անուն ID")
             return
         lines = "\n".join(f"• {n}" for n in sorted(contacts.keys()))
         await event.reply(f"❓ «{contact_name}» չգտնվեց:\n\n{lines}")
@@ -143,7 +177,9 @@ async def do_send(event, contact_name, message):
         await event.reply(f"⚠️ Չհաջողվեց ուղարկել {matched_name}-ին:\n{e}")
 
 async def handle_message(event):
-    if event.raw_text.startswith("/contacts"):
+    if event.raw_text.startswith("/sync"):
+        await cmd_sync(event)
+    elif event.raw_text.startswith("/contacts"):
         await cmd_contacts(event)
     elif event.raw_text.startswith("/add"):
         await cmd_add(event)
