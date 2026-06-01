@@ -18,6 +18,46 @@ CONTACTS_FILE = Path("/tmp/contacts.json")
 groq_client = Groq(api_key=GROQ_KEY)
 client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
 
+AM_LETTERS = {
+    'Ա': 'A', 'ա': 'a', 'Բ': 'B', 'բ': 'b', 'Գ': 'G', 'գ': 'g',
+    'Դ': 'D', 'դ': 'd', 'Ե': 'Ye', 'ե': 'ye', 'Զ': 'Z', 'զ': 'z',
+    'Է': 'E', 'է': 'e', 'Ը': 'E', 'ը': 'e', 'Թ': 'T', 'թ': 't',
+    'Ժ': 'Zh', 'ժ': 'zh', 'Ի': 'I', 'ի': 'i', 'Լ': 'L', 'լ': 'l',
+    'Խ': 'Kh', 'խ': 'kh', 'Ծ': 'Ts', 'ծ': 'ts', 'Կ': 'K', 'կ': 'k',
+    'Հ': 'H', 'հ': 'h', 'Ձ': 'Dz', 'ձ': 'dz', 'Ղ': 'Gh', 'ղ': 'gh',
+    'Ճ': 'Ch', 'ճ': 'ch', 'Մ': 'M', 'մ': 'm', 'Յ': 'Y', 'յ': 'y',
+    'Ն': 'N', 'ն': 'n', 'Շ': 'Sh', 'շ': 'sh', 'Ո': 'Vo', 'ո': 'vo',
+    'Չ': 'Ch', 'չ': 'ch', 'Պ': 'P', 'պ': 'p', 'Ջ': 'J', 'ջ': 'j',
+    'Ռ': 'R', 'ռ': 'r', 'Ս': 'S', 'ս': 's', 'Վ': 'V', 'վ': 'v',
+    'Տ': 'T', 'տ': 't', 'Ր': 'R', 'ր': 'r', 'Ց': 'Ts', 'ց': 'ts',
+    'Փ': 'P', 'փ': 'p', 'Ք': 'K', 'ք': 'k', 'Օ': 'O', 'օ': 'o',
+    'Ֆ': 'F', 'ֆ': 'f', 'ու': 'u', 'Ու': 'U',
+}
+
+def transliterate(name):
+    result = ''
+    i = 0
+    while i < len(name):
+        if i + 1 < len(name) and name[i:i+2] in AM_LETTERS:
+            result += AM_LETTERS[name[i:i+2]]
+            i += 2
+        elif name[i] in AM_LETTERS:
+            result += AM_LETTERS[name[i]]
+            i += 1
+        else:
+            result += name[i]
+            i += 1
+    return result
+
+def strip_armenian_suffix(name):
+    return re.sub(r'ային$|յին$|ին$', '', name)
+
+def normalize_name(name):
+    name = strip_armenian_suffix(name)
+    if any('\u0531' <= c <= '\u0587' for c in name):
+        name = transliterate(name)
+    return name.capitalize()
+
 def load_contacts():
     if CONTACTS_FILE.exists():
         with open(CONTACTS_FILE) as f:
@@ -36,14 +76,20 @@ def save_contacts(contacts):
         json.dump(contacts, f, ensure_ascii=False, indent=2)
 
 def find_contact(name, contacts):
+    name = normalize_name(name)
     nl = name.lower()
     for k, v in contacts.items():
         if k.lower() == nl:
             return k, v
     keys = list(contacts.keys())
-    close = difflib.get_close_matches(name, keys, n=1, cutoff=0.6)
+    close = difflib.get_close_matches(name, keys, n=3, cutoff=0.4)
     if close:
-        return close[0], contacts[close[0]]
+        if len(close) == 1:
+            return close[0], contacts[close[0]]
+        return None, close
+    for k in contacts.keys():
+        if nl in k.lower() or k.lower() in nl:
+            return k, contacts[k]
     return None, None
 
 async def transcribe(ogg_path):
@@ -51,13 +97,13 @@ async def transcribe(ogg_path):
         result = groq_client.audio.transcriptions.create(
             model="whisper-large-v3",
             file=f,
-            language="hy",
             response_format="text"
         )
     return result.strip()
 
 SEND_PATTERNS = [
-    r"(?P<name>\w+)[- ]?ին\s+(?:գրիր|ուղարկիր|ասա|փոխանցիր)\s+(?P<msg>.+)",
+    r"(?P<name>[\w\u0531-\u0587]+)[- ]?ին\s+(?:գրիր|ուղարկիր|ասա|փոխանցիր)\s+(?P<msg>.+)",
+    r"(?P<name>[\w\u0531-\u0587]+)ային\s+(?:գրիր|ուղարկիր|ասա|փոխանցիր)\s+(?P<msg>.+)",
     r"(?:write|send(?:\s+(?:a\s+)?message(?:\s+to)?)?)\s+(?P<name>\w+)\s+(?P<msg>.+)",
     r"(?:hey[,\s]+)?(?:i\s+need\s+(?:you\s+)?to\s+)?(?:write|send)\s+(?P<name>\w+)\s+(?P<msg>.+)",
 ]
@@ -66,8 +112,12 @@ def parse_send(text):
     for pat in SEND_PATTERNS:
         m = re.search(pat, text.strip(), re.IGNORECASE)
         if m:
-            return m.group("name").capitalize(), m.group("msg").strip()
+            raw_name = m.group("name").capitalize()
+            name = normalize_name(raw_name)
+            return name, m.group("msg").strip()
     return None, None
+
+pending_sends = {}
 
 async def cmd_sync(event):
     await event.reply("🔄 Սինքրոնիզացնում եմ կոնտակտները...")
@@ -168,8 +218,18 @@ async def do_send(event, contact_name, message):
         if not contacts:
             await event.reply("❌ Կոնտակտներ չկան: /sync կամ /add Անուն ID")
             return
-        lines = "\n".join(f"• {n}" for n in sorted(contacts.keys()))
-        await event.reply(f"❓ «{contact_name}» չգտնվեց:\n\n{lines}")
+        await event.reply(f"❓ «{contact_name}» չգտնվեց: Կոնտակտներից ընտրեք:\n\n" +
+            "\n".join(f"{i+1}. {n}" for i, n in enumerate(sorted(contacts.keys()))) +
+            "\n\nՊատասխանեք համարով, օրինակ: 1")
+        pending_sends[event.chat_id] = {"contacts": sorted(contacts.keys()), "message": message}
+        return
+    if isinstance(entry, list):
+        await event.reply(
+            f"❓ «{contact_name}» — նմանատիպ կոնտակտներ:\n\n" +
+            "\n".join(f"{i+1}. {n}" for i, n in enumerate(entry)) +
+            "\n\nՊատասխանեք համարով, օրինակ: 1"
+        )
+        pending_sends[event.chat_id] = {"contacts": entry, "message": message}
         return
     try:
         await client.send_message(entry["id"], message)
@@ -178,6 +238,26 @@ async def do_send(event, contact_name, message):
         await event.reply(f"⚠️ Չհաջողվեց ուղարկել {matched_name}-ին:\n{e}")
 
 async def handle_message(event):
+    chat_id = event.chat_id
+    if chat_id in pending_sends and event.raw_text.strip().isdigit():
+        choice = int(event.raw_text.strip()) - 1
+        pending = pending_sends.pop(chat_id)
+        names = pending["contacts"]
+        message = pending["message"]
+        if 0 <= choice < len(names):
+            name = names[choice]
+            contacts = load_contacts()
+            _, entry = find_contact(name, contacts)
+            if entry and not isinstance(entry, list):
+                try:
+                    await client.send_message(entry["id"], message)
+                    await event.reply(f"✅ Ուղարկվեց {name}-ին:\n«{message}»")
+                except Exception as e:
+                    await event.reply(f"⚠️ Սխալ: {e}")
+        else:
+            await event.reply("❌ Սխալ համար")
+        return
+
     if event.raw_text.startswith("/sync"):
         await cmd_sync(event)
     elif event.raw_text.startswith("/contacts"):
@@ -221,8 +301,10 @@ async def main():
     me = await client.get_me()
     my_id = me.id
 
-    @client.on(events.NewMessage(outgoing=True, chats=my_id))
+    @client.on(events.NewMessage(outgoing=True))
     async def on_message(event):
+        if event.chat_id != my_id:
+            return
         if event.voice:
             await handle_voice(event)
         elif event.raw_text:
