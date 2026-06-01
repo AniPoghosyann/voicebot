@@ -221,7 +221,7 @@ async def main():
     me = await client.get_me()
     my_id = me.id
 
-    @client.on(events.NewMessage(from_users=my_id, outgoing=False))
+    @client.on(events.NewMessage(outgoing=True, chats=my_id))
     async def on_message(event):
         if event.voice:
             await handle_voice(event)
