@@ -4,6 +4,7 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.functions.contacts import GetContactsRequest
 from groq import Groq
+from aiohttp import web
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -226,6 +227,18 @@ async def main():
             await handle_voice(event)
         elif event.raw_text:
             await handle_message(event)
+
+    async def handle_health(request):
+        return web.Response(text="OK")
+
+    app = web.Application()
+    app.router.add_get("/", handle_health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    log.info(f"Health check running on port {port}")
 
     await client.run_until_disconnected()
 
