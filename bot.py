@@ -5,6 +5,7 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.contacts import GetContactsRequest
 from groq import Groq
 from aiohttp import web
+import aiohttp
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -297,6 +298,34 @@ async def handle_voice(event):
     finally:
         os.unlink(tmp_path)
 
+
+async def keep_alive(url: str):
+    """Ping our own health endpoint every 10 min so Render doesn't spin us down."""
+    await asyncio.sleep(60)  # wait for full startup
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    log.info(f"Keep-alive ping → {resp.status}")
+            except Exception as e:
+                log.warning(f"Keep-alive ping failed: {e}")
+            await asyncio.sleep(10 * 60)  # every 10 minutes
+
+
+async def watchdog():
+    """Reconnect Telethon if the connection silently drops."""
+    await asyncio.sleep(30)  # wait for full startup
+    while True:
+        await asyncio.sleep(60)
+        if not client.is_connected():
+            log.warning("Telethon disconnected — reconnecting...")
+            try:
+                await client.connect()
+                log.info("Reconnected ✅")
+            except Exception as e:
+                log.error(f"Reconnect failed: {e}")
+
+
 async def main():
     await client.start()
     log.info("UserBot started ✅ — listening to yourself only")
@@ -325,7 +354,15 @@ async def main():
     await site.start()
     log.info(f"Health check running on port {port}")
 
+    # Render sets this automatically — e.g. https://voicebot-1-owgy.onrender.com
+    service_url = os.environ.get("RENDER_EXTERNAL_URL", f"http://localhost:{port}")
+    log.info(f"Keep-alive target: {service_url}")
+
+    asyncio.create_task(keep_alive(service_url))
+    asyncio.create_task(watchdog())
+
     await client.run_until_disconnected()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
