@@ -96,12 +96,15 @@ def find_contact(name, contacts):
 async def transcribe(ogg_path):
     with open(ogg_path, "rb") as f:
         result = groq_client.audio.transcriptions.create(
-            model="whisper-large-v3-turbo",
+            model="whisper-large-v3",
             file=f,
+            language="hy",
             response_format="verbose_json",
-            prompt="Armenian, English or Russian speech. Names of people."
+            prompt="Արևելահայերեն։ Անի, Արամ, Մարի, գրիր, ուղարկիր, բարև, լավ եմ։"
         )
-    return result.text.strip()
+    text = result.text.strip()
+    log.info(f"Whisper raw output: {text}")
+    return text
 
 SEND_PATTERNS = [
     r"(?P<name>[\w\u0531-\u0587]+)[- ]?ին\s+(?:գրիր|ուղարկիր|ասա|փոխանցիր)\s+(?P<msg>.+)",
@@ -283,12 +286,12 @@ async def handle_voice(event):
     await client.download_media(event.message, tmp_path)
     try:
         text = await transcribe(tmp_path)
-        await event.reply(f"📝 Լսեցի:\n{text}")
+        await event.reply(f"📝 Լսեցի:\n`{text}`")  # backticks show exact characters
         contact_name, message = parse_send(text)
         if contact_name is None:
             await event.reply(
                 "🤔 Հասկացա ձայնը, բայց հրաման չտեսա:\n\n"
-                "Ասեք, օրինակ:\n• «Ani-ին գրիր Okay»\n• «Write Aram I'm coming»"
+                "Ասեք, օրինակ:\n• «Անի-ին գրիր Okay»\n• «Write Aram I'm coming»"
             )
             return
         await do_send(event, contact_name, message)
@@ -301,7 +304,7 @@ async def handle_voice(event):
 
 async def keep_alive(url: str):
     """Ping our own health endpoint every 10 min so Render doesn't spin us down."""
-    await asyncio.sleep(60)  # wait for full startup
+    await asyncio.sleep(60)
     async with aiohttp.ClientSession() as session:
         while True:
             try:
@@ -309,12 +312,12 @@ async def keep_alive(url: str):
                     log.info(f"Keep-alive ping → {resp.status}")
             except Exception as e:
                 log.warning(f"Keep-alive ping failed: {e}")
-            await asyncio.sleep(10 * 60)  # every 10 minutes
+            await asyncio.sleep(10 * 60)
 
 
 async def watchdog():
     """Reconnect Telethon if the connection silently drops."""
-    await asyncio.sleep(30)  # wait for full startup
+    await asyncio.sleep(30)
     while True:
         await asyncio.sleep(60)
         if not client.is_connected():
@@ -354,7 +357,6 @@ async def main():
     await site.start()
     log.info(f"Health check running on port {port}")
 
-    # Render sets this automatically — e.g. https://voicebot-1-owgy.onrender.com
     service_url = os.environ.get("RENDER_EXTERNAL_URL", f"http://localhost:{port}")
     log.info(f"Keep-alive target: {service_url}")
 
