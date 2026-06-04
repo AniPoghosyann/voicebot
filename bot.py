@@ -36,6 +36,7 @@ AM_LETTERS = {
 }
 
 def transliterate(name):
+    """Convert Armenian script to Latin letters."""
     result = ''
     i = 0
     while i < len(name):
@@ -51,13 +52,76 @@ def transliterate(name):
     return result
 
 def strip_armenian_suffix(name):
-    return re.sub(r'ային$|յին$|ին$', '', name)
+    """Strip Armenian grammatical suffixes: Անիին → Անի, Անիի → Անի"""
+    return re.sub(r'ային$|յին$|ուն$|ին$|ի$', '', name)
 
-def normalize_name(name):
-    name = strip_armenian_suffix(name)
+def to_latin(name: str) -> str:
+    """
+    Normalize any name to Latin lowercase for comparison.
+    Handles:
+      - Pure Armenian script  → transliterate → lowercase
+      - Already Latin         → lowercase
+      - Mixed                 → transliterate whatever is Armenian, lowercase rest
+    Also strips Armenian grammatical suffixes before transliterating.
+    """
+    name = name.strip()
+    # Strip suffix only if the name contains Armenian characters
     if any('\u0531' <= c <= '\u0587' for c in name):
+        name = strip_armenian_suffix(name)
         name = transliterate(name)
-    return name.capitalize()
+    return name.lower()
+
+def find_contact(spoken_name: str, contacts: dict):
+    """
+    Match a spoken name (may be Armenian script or already Latin) against
+    the contacts dict whose keys are Latin strings.
+
+    Returns:
+      (matched_key, entry)   — exact or single best match
+      (None, [list of keys]) — multiple close matches, caller should ask user
+      (None, None)           — no match found
+    """
+    latin = to_latin(spoken_name)
+    log.info(f"Looking for '{spoken_name}' → normalized '{latin}'")
+
+    # 1. Exact match (case-insensitive)
+    for k in contacts:
+        if k.lower() == latin:
+            log.info(f"Exact match: {k}")
+            return k, contacts[k]
+
+    # 2. Starts-with match (e.g. "Ani" matches "Ani Petrosyan")
+    starts = [k for k in contacts if k.lower().startswith(latin)]
+    if len(starts) == 1:
+        log.info(f"Starts-with match: {starts[0]}")
+        return starts[0], contacts[starts[0]]
+    if len(starts) > 1:
+        log.info(f"Multiple starts-with matches: {starts}")
+        return None, starts
+
+    # 3. Fuzzy match — lower cutoff (0.5) catches transliteration differences
+    #    e.g. "Armen" ↔ "Armenak", "Narek" ↔ "Narek"
+    keys_lower = {k.lower(): k for k in contacts}
+    close_lower = difflib.get_close_matches(latin, keys_lower.keys(), n=5, cutoff=0.5)
+    close = [keys_lower[c] for c in close_lower]
+    if len(close) == 1:
+        log.info(f"Fuzzy single match: {close[0]}")
+        return close[0], contacts[close[0]]
+    if len(close) > 1:
+        log.info(f"Fuzzy multiple matches: {close}")
+        return None, close
+
+    # 4. Substring match as last resort
+    substr = [k for k in contacts if latin in k.lower() or k.lower() in latin]
+    if len(substr) == 1:
+        log.info(f"Substring match: {substr[0]}")
+        return substr[0], contacts[substr[0]]
+    if len(substr) > 1:
+        log.info(f"Substring multiple matches: {substr}")
+        return None, substr
+
+    log.info(f"No match found for '{latin}'")
+    return None, None
 
 def load_contacts():
     if CONTACTS_FILE.exists():
@@ -75,23 +139,6 @@ def load_contacts():
 def save_contacts(contacts):
     with open(CONTACTS_FILE, "w") as f:
         json.dump(contacts, f, ensure_ascii=False, indent=2)
-
-def find_contact(name, contacts):
-    name = normalize_name(name)
-    nl = name.lower()
-    for k, v in contacts.items():
-        if k.lower() == nl:
-            return k, v
-    keys = list(contacts.keys())
-    close = difflib.get_close_matches(name, keys, n=3, cutoff=0.4)
-    if close:
-        if len(close) == 1:
-            return close[0], contacts[close[0]]
-        return None, close
-    for k in contacts.keys():
-        if nl in k.lower() or k.lower() in nl:
-            return k, contacts[k]
-    return None, None
 
 async def transcribe(ogg_path):
     with open(ogg_path, "rb") as f:
@@ -117,9 +164,9 @@ def parse_send(text):
     for pat in SEND_PATTERNS:
         m = re.search(pat, text.strip(), re.IGNORECASE)
         if m:
-            raw_name = m.group("name").capitalize()
-            name = normalize_name(raw_name)
-            return name, m.group("msg").strip()
+            raw_name = m.group("name")
+            # Keep Armenian script intact — find_contact will transliterate it
+            return raw_name, m.group("msg").strip()
     return None, None
 
 pending_sends = {}
@@ -212,32 +259,40 @@ async def cmd_help(event):
         "/help — օգնություն\n\n"
         "📨 Ուղարկելու համար:\n"
         "• Write Ani Hello\n"
-        "• Ani-ին գրիր Բարև\n"
+        "• Անի-ին գրիր Բարև\n"
         "• Կամ ձայնային հաղորդագրություն"
     )
 
 async def do_send(event, contact_name, message):
     contacts = load_contacts()
     matched_name, entry = find_contact(contact_name, contacts)
+
+    # No match at all — show full contact list so user can pick
     if entry is None:
         if not contacts:
             await event.reply("❌ Կոնտակտներ չկան: /sync կամ /add Անուն ID")
             return
+        latin = to_latin(contact_name)
         await event.reply(
-            f"❓ «{contact_name}» չգտնվեց: Ընտրեք կոնտակտ:\n\n" +
+            f"❓ «{latin}» չգտնվեց կոնտակտներում:\n\n" +
             "\n".join(f"{i+1}. {n}" for i, n in enumerate(sorted(contacts.keys()))) +
-            "\n\nՊատասխանեք համարով, օրինակ: 1"
+            "\n\nՊատասխանեք համարով կամ գրեք 0 չեղարկելու համար:"
         )
         pending_sends[event.chat_id] = {"contacts": sorted(contacts.keys()), "message": message}
         return
+
+    # Multiple close matches — let user choose
     if isinstance(entry, list):
+        latin = to_latin(contact_name)
         await event.reply(
-            f"❓ «{contact_name}» — նմանատիպ կոնտակտներ:\n\n" +
+            f"❓ «{latin}» — մի քանի նմանատիպ կոնտակտ:\n\n" +
             "\n".join(f"{i+1}. {n}" for i, n in enumerate(entry)) +
-            "\n\nՊատասխանեք համարով, օրինակ: 1"
+            "\n\nՊատասխանեք համարով կամ գրեք 0 չեղարկելու համար:"
         )
         pending_sends[event.chat_id] = {"contacts": entry, "message": message}
         return
+
+    # Single match — send directly
     try:
         await client.send_message(entry["id"], message)
         await event.reply(f"✅ Ուղարկվեց {matched_name}-ին:\n«{message}»")
@@ -246,11 +301,16 @@ async def do_send(event, contact_name, message):
 
 async def handle_message(event):
     chat_id = event.chat_id
+
+    # Handle pending contact selection
     if chat_id in pending_sends and event.raw_text.strip().isdigit():
         choice = int(event.raw_text.strip()) - 1
         pending = pending_sends.pop(chat_id)
         names = pending["contacts"]
         message = pending["message"]
+        if choice == -1:  # user sent 0
+            await event.reply("❌ Չեղարկված")
+            return
         if 0 <= choice < len(names):
             name = names[choice]
             contacts = load_contacts()
@@ -261,6 +321,8 @@ async def handle_message(event):
                     await event.reply(f"✅ Ուղարկվեց {name}-ին:\n«{message}»")
                 except Exception as e:
                     await event.reply(f"⚠️ Սխալ: {e}")
+            else:
+                await event.reply("⚠️ Կոնտակտը չգտնվեց, փորձեք կրկին")
         else:
             await event.reply("❌ Սխալ համար")
         return
