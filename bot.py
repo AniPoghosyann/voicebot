@@ -15,6 +15,7 @@ API_HASH      = os.environ["TELEGRAM_API_HASH"]
 SESSION       = os.environ["TELEGRAM_SESSION"]
 GROQ_KEY      = os.environ["GROQ_API_KEY"]
 CONTACTS_FILE = Path("/tmp/contacts.json")
+CHATS_FILE    = Path("/tmp/chats.json")
 
 groq_client = Groq(api_key=GROQ_KEY)
 client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
@@ -36,7 +37,6 @@ AM_LETTERS = {
 }
 
 def transliterate(name):
-    """Convert Armenian script to Latin letters."""
     result = ''
     i = 0
     while i < len(name):
@@ -52,76 +52,54 @@ def transliterate(name):
     return result
 
 def strip_armenian_suffix(name):
-    """Strip Armenian grammatical suffixes: Անիին → Անի, Անիի → Անի"""
     return re.sub(r'ային$|յին$|ուն$|ին$|ի$', '', name)
 
 def to_latin(name: str) -> str:
-    """
-    Normalize any name to Latin lowercase for comparison.
-    Handles:
-      - Pure Armenian script  → transliterate → lowercase
-      - Already Latin         → lowercase
-      - Mixed                 → transliterate whatever is Armenian, lowercase rest
-    Also strips Armenian grammatical suffixes before transliterating.
-    """
     name = name.strip()
-    # Strip suffix only if the name contains Armenian characters
     if any('\u0531' <= c <= '\u0587' for c in name):
         name = strip_armenian_suffix(name)
         name = transliterate(name)
     return name.lower()
 
-def find_contact(spoken_name: str, contacts: dict):
+def find_in_dict(spoken_name: str, store: dict):
     """
-    Match a spoken name (may be Armenian script or already Latin) against
-    the contacts dict whose keys are Latin strings.
-
-    Returns:
-      (matched_key, entry)   — exact or single best match
-      (None, [list of keys]) — multiple close matches, caller should ask user
-      (None, None)           — no match found
+    Generic fuzzy finder used for both contacts and chats.
+    Returns (matched_key, entry) or (None, [list]) or (None, None).
     """
     latin = to_latin(spoken_name)
     log.info(f"Looking for '{spoken_name}' → normalized '{latin}'")
 
-    # 1. Exact match (case-insensitive)
-    for k in contacts:
+    for k in store:
         if k.lower() == latin:
-            log.info(f"Exact match: {k}")
-            return k, contacts[k]
+            return k, store[k]
 
-    # 2. Starts-with match (e.g. "Ani" matches "Ani Petrosyan")
-    starts = [k for k in contacts if k.lower().startswith(latin)]
+    starts = [k for k in store if k.lower().startswith(latin)]
     if len(starts) == 1:
-        log.info(f"Starts-with match: {starts[0]}")
-        return starts[0], contacts[starts[0]]
+        return starts[0], store[starts[0]]
     if len(starts) > 1:
-        log.info(f"Multiple starts-with matches: {starts}")
         return None, starts
 
-    # 3. Fuzzy match — lower cutoff (0.5) catches transliteration differences
-    #    e.g. "Armen" ↔ "Armenak", "Narek" ↔ "Narek"
-    keys_lower = {k.lower(): k for k in contacts}
+    keys_lower = {k.lower(): k for k in store}
     close_lower = difflib.get_close_matches(latin, keys_lower.keys(), n=5, cutoff=0.5)
     close = [keys_lower[c] for c in close_lower]
     if len(close) == 1:
-        log.info(f"Fuzzy single match: {close[0]}")
-        return close[0], contacts[close[0]]
+        return close[0], store[close[0]]
     if len(close) > 1:
-        log.info(f"Fuzzy multiple matches: {close}")
         return None, close
 
-    # 4. Substring match as last resort
-    substr = [k for k in contacts if latin in k.lower() or k.lower() in latin]
+    substr = [k for k in store if latin in k.lower() or k.lower() in latin]
     if len(substr) == 1:
-        log.info(f"Substring match: {substr[0]}")
-        return substr[0], contacts[substr[0]]
+        return substr[0], store[substr[0]]
     if len(substr) > 1:
-        log.info(f"Substring multiple matches: {substr}")
         return None, substr
 
-    log.info(f"No match found for '{latin}'")
     return None, None
+
+# Keep old name as alias so existing call sites work
+def find_contact(spoken_name, contacts):
+    return find_in_dict(spoken_name, contacts)
+
+# ── Contacts storage ──────────────────────────────────────────────────────────
 
 def load_contacts():
     if CONTACTS_FILE.exists():
@@ -140,6 +118,20 @@ def save_contacts(contacts):
     with open(CONTACTS_FILE, "w") as f:
         json.dump(contacts, f, ensure_ascii=False, indent=2)
 
+# ── Chats storage ─────────────────────────────────────────────────────────────
+
+def load_chats():
+    if CHATS_FILE.exists():
+        with open(CHATS_FILE) as f:
+            return json.load(f)
+    return {}
+
+def save_chats(chats):
+    with open(CHATS_FILE, "w") as f:
+        json.dump(chats, f, ensure_ascii=False, indent=2)
+
+# ── Transcription ─────────────────────────────────────────────────────────────
+
 async def transcribe(ogg_path):
     with open(ogg_path, "rb") as f:
         result = groq_client.audio.transcriptions.create(
@@ -153,6 +145,8 @@ async def transcribe(ogg_path):
     log.info(f"Whisper raw output: {text}")
     return text
 
+# ── Send pattern parsing ──────────────────────────────────────────────────────
+
 SEND_PATTERNS = [
     r"(?P<name>[\w\u0531-\u0587]+)[- ]?ին\s+(?:գրիր|ուղարկիր|ասա|փոխանցիր)\s+(?P<msg>.+)",
     r"(?P<name>[\w\u0531-\u0587]+)ային\s+(?:գրիր|ուղարկիր|ասա|փոխանցիր)\s+(?P<msg>.+)",
@@ -164,12 +158,12 @@ def parse_send(text):
     for pat in SEND_PATTERNS:
         m = re.search(pat, text.strip(), re.IGNORECASE)
         if m:
-            raw_name = m.group("name")
-            # Keep Armenian script intact — find_contact will transliterate it
-            return raw_name, m.group("msg").strip()
+            return m.group("name"), m.group("msg").strip()
     return None, None
 
 pending_sends = {}
+
+# ── Commands ──────────────────────────────────────────────────────────────────
 
 async def cmd_sync(event):
     await event.reply("🔄 Սինքրոնիզացնում եմ կոնտակտները...")
@@ -191,16 +185,46 @@ async def cmd_sync(event):
             while name in contacts and contacts[name]["id"] != user.id:
                 name = f"{base}{i}"
                 i += 1
-            contacts[name] = {
-                "id": user.id,
-                "username": user.username or ""
-            }
+            contacts[name] = {"id": user.id, "username": user.username or ""}
             count += 1
         save_contacts(contacts)
         await event.reply(f"✅ {count} կոնտակտ սինքրոնիզացվեց!")
     except Exception as e:
         log.exception("Sync error")
         await event.reply(f"⚠️ Սխալ: {e}")
+
+async def cmd_sync_chats(event):
+    """Sync group chats from recent dialogs."""
+    await event.reply("🔄 Սինքրոնիզացնում եմ խմբային չաթերը...")
+    try:
+        chats = load_chats()
+        count = 0
+        async for dialog in client.iter_dialogs():
+            # Only group chats (not channels, not private)
+            if not dialog.is_group:
+                continue
+            name = (dialog.name or "").strip()
+            if not name:
+                continue
+            chats[name] = {"id": dialog.id}
+            count += 1
+        save_chats(chats)
+        await event.reply(f"✅ {count} խմբային չաթ սինքրոնիզացվեց!")
+    except Exception as e:
+        log.exception("Sync chats error")
+        await event.reply(f"⚠️ Սխալ: {e}")
+
+async def cmd_chats(event):
+    chats = load_chats()
+    if not chats:
+        await event.reply(
+            "Խմբային չաթեր չկան:\n\n"
+            "/syncchats — ավտոմատ սինքրոնիզացնել"
+        )
+        return
+    lines = [f"{i}. {name}  {info['id']}"
+             for i, (name, info) in enumerate(sorted(chats.items()), 1)]
+    await event.reply(f"💬 Խմբային չաթեր ({len(chats)}):\n\n" + "\n".join(lines))
 
 async def cmd_contacts(event):
     contacts = load_contacts()
@@ -215,9 +239,7 @@ async def cmd_contacts(event):
     for i, (name, info) in enumerate(sorted(contacts.items()), 1):
         uname = f"  @{info['username']}" if info.get("username") else ""
         lines.append(f"{i}. {name}{uname}  {info['id']}")
-    await event.reply(
-        f"📋 Կոնտակտներ ({len(contacts)}):\n\n" + "\n".join(lines)
-    )
+    await event.reply(f"📋 Կոնտակտներ ({len(contacts)}):\n\n" + "\n".join(lines))
 
 async def cmd_add(event):
     parts = event.raw_text.strip().split()
@@ -252,82 +274,131 @@ async def cmd_remove(event):
 async def cmd_help(event):
     await event.reply(
         "🤖 Հրամաններ:\n\n"
-        "/sync — ավտոմատ սինքրոնիզացնել բոլոր կոնտակտները\n"
+        "👤 Կոնտակտներ\n"
+        "/sync — սինքրոնիզացնել կոնտակտները\n"
         "/contacts — բոլոր կոնտակտները\n"
         "/add Ani 123456789 — ձեռքով ավելացնել\n"
-        "/remove Ani — ջնջել\n"
+        "/remove Ani — ջնջել\n\n"
+        "💬 Խմբային չաթեր\n"
+        "/syncchats — սինքրոնիզացնել խմբային չաթերը\n"
+        "/chats — բոլոր խմբային չաթերը\n\n"
         "/help — օգնություն\n\n"
         "📨 Ուղարկելու համար:\n"
         "• Write Ani Hello\n"
         "• Անի-ին գրիր Բարև\n"
+        "• Work chat-ին գրիր Meeting at 3\n"
         "• Կամ ձայնային հաղորդագրություն"
     )
 
-async def do_send(event, contact_name, message):
+# ── Core send logic ───────────────────────────────────────────────────────────
+
+async def do_send(event, target_name, message):
     contacts = load_contacts()
-    matched_name, entry = find_contact(contact_name, contacts)
+    chats    = load_chats()
 
-    # No match at all — show full contact list so user can pick
-    if entry is None:
-        if not contacts:
-            await event.reply("❌ Կոնտակտներ չկան: /sync կամ /add Անուն ID")
+    # Search contacts first, then group chats
+    matched_name, entry = find_in_dict(target_name, contacts)
+    source = "contact"
+
+    if entry is None and matched_name is None:
+        # Try group chats
+        matched_name, entry = find_in_dict(target_name, chats)
+        source = "chat"
+
+    # Still nothing — show combined list
+    if entry is None and matched_name is None:
+        if not contacts and not chats:
+            await event.reply("❌ Կոնտակտներ և չաթեր չկան:\n/sync  /syncchats")
             return
-        latin = to_latin(contact_name)
+        combined = sorted(contacts.keys()) + sorted(chats.keys())
+        latin = to_latin(target_name)
         await event.reply(
-            f"❓ «{latin}» չգտնվեց կոնտակտներում:\n\n" +
-            "\n".join(f"{i+1}. {n}" for i, n in enumerate(sorted(contacts.keys()))) +
-            "\n\nՊատասխանեք համարով կամ գրեք 0 չեղարկելու համար:"
+            f"❓ «{latin}» չգտնվեց:\n\n" +
+            "\n".join(f"{i+1}. {n}" for i, n in enumerate(combined)) +
+            "\n\nՊատասխանեք համարով կամ 0՝ չեղարկելու:"
         )
-        pending_sends[event.chat_id] = {"contacts": sorted(contacts.keys()), "message": message}
+        pending_sends[event.chat_id] = {
+            "contacts": combined,
+            "message": message,
+            "contacts_keys": sorted(contacts.keys()),
+            "chats_keys": sorted(chats.keys()),
+        }
         return
 
-    # Multiple close matches — let user choose
+    # Multiple matches — ask user to choose
     if isinstance(entry, list):
-        latin = to_latin(contact_name)
+        latin = to_latin(target_name)
         await event.reply(
-            f"❓ «{latin}» — մի քանի նմանատիպ կոնտակտ:\n\n" +
+            f"❓ «{latin}» — մի քանի նմանատիպ:\n\n" +
             "\n".join(f"{i+1}. {n}" for i, n in enumerate(entry)) +
-            "\n\nՊատասխանեք համարով կամ գրեք 0 չեղարկելու համար:"
+            "\n\nՊատասխանեք համարով կամ 0՝ չեղարկելու:"
         )
-        pending_sends[event.chat_id] = {"contacts": entry, "message": message}
+        pending_sends[event.chat_id] = {
+            "contacts": entry,
+            "message": message,
+            "contacts_keys": sorted(contacts.keys()),
+            "chats_keys": sorted(chats.keys()),
+        }
         return
 
-    # Single match — send directly
+    # Single match — send
+    target_id = entry["id"]
     try:
-        await client.send_message(entry["id"], message)
-        await event.reply(f"✅ Ուղարկվեց {matched_name}-ին:\n«{message}»")
+        await client.send_message(target_id, message)
+        icon = "💬" if source == "chat" else "✅"
+        await event.reply(f"{icon} Ուղարկվեց {matched_name}-ին:\n«{message}»")
     except Exception as e:
         await event.reply(f"⚠️ Չհաջողվեց ուղարկել {matched_name}-ին:\n{e}")
+
+# ── Message & voice handlers ──────────────────────────────────────────────────
 
 async def handle_message(event):
     chat_id = event.chat_id
 
-    # Handle pending contact selection
+    # Resolve pending contact/chat selection
     if chat_id in pending_sends and event.raw_text.strip().isdigit():
         choice = int(event.raw_text.strip()) - 1
         pending = pending_sends.pop(chat_id)
-        names = pending["contacts"]
+        names   = pending["contacts"]   # combined list shown to user
         message = pending["message"]
-        if choice == -1:  # user sent 0
+        contacts_keys = pending.get("contacts_keys", [])
+        chats_keys    = pending.get("chats_keys", [])
+
+        if choice == -1:
             await event.reply("❌ Չեղարկված")
             return
-        if 0 <= choice < len(names):
-            name = names[choice]
-            contacts = load_contacts()
-            _, entry = find_contact(name, contacts)
-            if entry and not isinstance(entry, list):
-                try:
-                    await client.send_message(entry["id"], message)
-                    await event.reply(f"✅ Ուղարկվեց {name}-ին:\n«{message}»")
-                except Exception as e:
-                    await event.reply(f"⚠️ Սխալ: {e}")
-            else:
-                await event.reply("⚠️ Կոնտակտը չգտնվեց, փորձեք կրկին")
-        else:
+        if not (0 <= choice < len(names)):
             await event.reply("❌ Սխալ համար")
+            return
+
+        name = names[choice]
+        contacts = load_contacts()
+        chats    = load_chats()
+
+        # Figure out if the chosen name is a contact or a chat
+        if name in contacts:
+            entry = contacts[name]
+        elif name in chats:
+            entry = chats[name]
+        else:
+            # Fallback fuzzy search across both
+            _, entry = find_in_dict(name, {**contacts, **chats})
+
+        if entry and not isinstance(entry, list):
+            try:
+                await client.send_message(entry["id"], message)
+                await event.reply(f"✅ Ուղարկվեց {name}-ին:\n«{message}»")
+            except Exception as e:
+                await event.reply(f"⚠️ Սխալ: {e}")
+        else:
+            await event.reply("⚠️ Կոնտակտը չգտնվեց, փորձեք կրկին")
         return
 
-    if event.raw_text.startswith("/sync"):
+    if event.raw_text.startswith("/syncchats"):
+        await cmd_sync_chats(event)
+    elif event.raw_text.startswith("/chats"):
+        await cmd_chats(event)
+    elif event.raw_text.startswith("/sync"):
         await cmd_sync(event)
     elif event.raw_text.startswith("/contacts"):
         await cmd_contacts(event)
@@ -348,7 +419,7 @@ async def handle_voice(event):
     await client.download_media(event.message, tmp_path)
     try:
         text = await transcribe(tmp_path)
-        await event.reply(f"📝 Լսեցի:\n`{text}`")  # backticks show exact characters
+        await event.reply(f"📝 Լսեցի:\n`{text}`")
         contact_name, message = parse_send(text)
         if contact_name is None:
             await event.reply(
@@ -363,9 +434,9 @@ async def handle_voice(event):
     finally:
         os.unlink(tmp_path)
 
+# ── Keep-alive & watchdog ─────────────────────────────────────────────────────
 
 async def keep_alive(url: str):
-    """Ping our own health endpoint every 10 min so Render doesn't spin us down."""
     await asyncio.sleep(60)
     async with aiohttp.ClientSession() as session:
         while True:
@@ -376,9 +447,7 @@ async def keep_alive(url: str):
                 log.warning(f"Keep-alive ping failed: {e}")
             await asyncio.sleep(10 * 60)
 
-
 async def watchdog():
-    """Reconnect Telethon if the connection silently drops."""
     await asyncio.sleep(30)
     while True:
         await asyncio.sleep(60)
@@ -390,6 +459,7 @@ async def watchdog():
             except Exception as e:
                 log.error(f"Reconnect failed: {e}")
 
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 async def main():
     await client.start()
@@ -426,7 +496,6 @@ async def main():
     asyncio.create_task(watchdog())
 
     await client.run_until_disconnected()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
