@@ -171,6 +171,45 @@ SEND_PATTERNS = [
     r"(?:hey[,\s]+)?(?:i\s+need\s+(?:you\s+)?to\s+)?(?:write|send)\s+(?P<name>\w+)\s+(?P<msg>.+)",
 ]
 
+ASSISTANT_NAME = "xelacis"
+ASSISTANT_PATTERN = re.compile(
+    r"(?i)^(?:hey\s+)?xelacis[,\s]+(.+)",
+    re.DOTALL
+)
+
+def parse_assistant(text: str):
+    """Returns the query if the message is directed at the assistant, else None."""
+    m = ASSISTANT_PATTERN.match(text.strip())
+    return m.group(1).strip() if m else None
+
+async def ask_assistant(query: str) -> str:
+    """Send query to Groq LLM and return the response."""
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama3-70b-8192",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are Xelacis, a personal AI assistant embedded in Telegram. "
+                        "You help your owner with quick answers, reply suggestions, weather, "
+                        "general knowledge, and anything they ask. "
+                        "Always reply in the same language the user writes in — "
+                        "Armenian, English, or Russian. "
+                        "Be concise and practical. "
+                        "When suggesting message replies, give 2-3 short options numbered."
+                    )
+                },
+                {"role": "user", "content": query}
+            ],
+            max_tokens=512,
+            temperature=0.7,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        log.exception("Assistant error")
+        return f"⚠️ Սխալ: {e}"
+
 def parse_send(text):
     for pat in SEND_PATTERNS:
         m = re.search(pat, text.strip(), re.IGNORECASE)
@@ -308,21 +347,25 @@ async def cmd_remove(event):
 
 async def cmd_help(event):
     await event.reply(
-        "🤖 Հրամաններ:\n\n"
-        "👤 Կոնտակտներ\n"
-        "/sync — սինքրոնիզացնել կոնտակտները\n"
-        "/contacts — բոլոր կոնտակտները\n"
-        "/add Ani 123456789 — ձեռքով ավելացնել\n"
-        "/remove Ani — ջնջել\n\n"
-        "💬 Խմբային չաթեր\n"
-        "/syncchats — սինքրոնիզացնել խմբային չաթերը\n"
-        "/chats — բոլոր խմբային չաթերը\n\n"
-        "/help — օգնություն\n\n"
-        "📨 Ուղարկելու համար:\n"
+        "🤖 Հрамаnn:\n\n"
+        "👤 Կоntakтнер\n"
+        "/sync — авtoмат сиnkроnизацнел контакты\n"
+        "/contacts — болор контакты\n"
+        "/add Ani 123456789 — ձернков аvelацнел\n"
+        "/remove Ani — ջнджел\n\n"
+        "💬 Xmбаян чаter\n"
+        "/syncchats — синкрониcацнел хмб чаtер\n"
+        "/chats — болор хмб чаtер\n\n"
+        "/help — огнутюн\n\n"
+        "📨 Отправнел:\n"
         "• Write Ani Hello\n"
-        "• Անի-ին գրիր Բարև\n"
-        "• Work chat-ին գրիր Meeting at 3\n"
-        "• Կամ ձայնային հաղորդագրություն"
+        "• Анi-ин грiр Барев\n"
+        "• Work chat-ин грiр Meeting at 3\n\n"
+        "🤖 Xelacis — анхнаkан AI:\n"
+        "• Xelacis, what should I reply to Ani?\n"
+        "• Xelacis, how is weather in Yerevan?\n"
+        "• Xelacis, write formal message for being late\n"
+        "• Кам ձayнаyin haгorдaгroстюн"
     )
 
 # ── Core send logic ───────────────────────────────────────────────────────────
@@ -454,28 +497,41 @@ async def handle_message(event):
     elif event.raw_text.startswith("/help"):
         await cmd_help(event)
     else:
+        # Check if addressing the assistant
+        assistant_query = parse_assistant(event.raw_text)
+        if assistant_query:
+            await event.reply("🤔 Մտածում եմ...")
+            answer = await ask_assistant(assistant_query)
+            await event.reply(f"🤖 Xelacis:\n\n{answer}")
+            return
+
         contact_name, message = parse_send(event.raw_text)
         if contact_name:
             await do_send(event, contact_name, message)
 
 async def handle_voice(event):
-    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(suffix='.ogg', delete=False) as tmp:
         tmp_path = tmp.name
     await client.download_media(event.message, tmp_path)
     try:
         text = await transcribe(tmp_path)
-        await event.reply(f"📝 Լսեցի:\n`{text}`")
+        await event.reply('📝 Լսեci:\n`' + text + '`')
+        assistant_query = parse_assistant(text)
+        if assistant_query:
+            answer = await ask_assistant(assistant_query)
+            await event.reply('🤖 Xelacis:\n\n' + answer)
+            return
         contact_name, message = parse_send(text)
         if contact_name is None:
             await event.reply(
-                "🤔 Հասկացա ձայնը, բայց հրաման չտեսա:\n\n"
-                "Ասեք, օրինակ:\n• «Անի-ին գրիր Okay»\n• «Write Aram I'm coming»"
+                '🤔 Հaskaца ձayнn, բayc hramaN чteса:\n\n'
+                'Ор. «Aнi-iн грiр Okay» «Write Aram coming»'
             )
             return
         await do_send(event, contact_name, message)
     except Exception as e:
-        log.exception("Voice error")
-        await event.reply(f"⚠️ Սխալ: {e}")
+        log.exception('Voice error')
+        await event.reply('⚠️ Cm\u056al: ' + str(e))
     finally:
         os.unlink(tmp_path)
 
