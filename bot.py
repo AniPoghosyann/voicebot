@@ -170,18 +170,16 @@ async def ask_assistant(query):
                 {
                     "role": "system",
                     "content": (
-                        "You are Xelacis, a personal AI assistant embedded in Telegram. "
-                        "Help your owner with quick answers, reply suggestions, weather, "
-                        "and anything they ask. "
-                        "Always reply in the same language the user writes in — "
-                        "Armenian, English, or Russian. "
-                        "Be concise and practical. "
-                        "When suggesting message replies, give 2-3 short options numbered."
+                        "You are Xelacis, a personal AI assistant inside Telegram. "
+                        "Behave like a smart helpful AI — answer any question, follow any instruction, "
+                        "give lists, options, numbers, creative text, translations, or anything asked. "
+                        "Always reply in the same language the user writes in: Armenian, English, or Russian. "
+                        "If you cannot access live data like weather, say so honestly."
                     )
                 },
                 {"role": "user", "content": query}
             ],
-            max_tokens=512,
+            max_tokens=1024,
             temperature=0.7,
         )
         return response.choices[0].message.content.strip()
