@@ -203,7 +203,18 @@ def parse_send(text):
             return m.group("name"), m.group("msg").strip()
     return None, None
 
-pending_sends = {}
+pending_sends = {}  # {chat_id: {contacts, message, timestamp}}
+
+async def cleanup_pending():
+    """Clear pending selections older than 2 minutes so they don't get stuck."""
+    import time
+    while True:
+        await asyncio.sleep(30)
+        now = time.time()
+        stale = [k for k, v in pending_sends.items() if now - v.get("ts", now) > 120]
+        for k in stale:
+            del pending_sends[k]
+            log.info("Cleared stale pending for chat %s", k)
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 
@@ -310,6 +321,7 @@ async def cmd_remove(event):
             "message": "__remove__",
             "contacts_keys": sorted(contacts.keys()),
             "chats_keys": [],
+            "ts": time.time()
         }
         return
     if matched:
@@ -371,6 +383,7 @@ async def do_send(event, target_name, message):
             "message": message,
             "contacts_keys": sorted(contacts.keys()),
             "chats_keys": sorted(chats.keys()),
+            "ts": time.time()
         }
         return
 
@@ -385,6 +398,7 @@ async def do_send(event, target_name, message):
             "message": message,
             "contacts_keys": sorted(contacts.keys()),
             "chats_keys": sorted(chats.keys()),
+            "ts": time.time()
         }
         return
 
@@ -487,14 +501,14 @@ async def handle_voice(event):
         contact_name, message = parse_send(text)
         if contact_name is None:
             await event.reply(
-                "🤔 հասկացա ձայնը, բայց հրաման չտեսա:\n\n"
-                "Ասեք:\n• «Ani-ին գրիր Okay»\n• «Write Aram I'm coming»\n• «Xelacis, ...»"
+                "🤔 Հaskaца ձayнn, բayc hramaN чteса:\n\n"
+                "Асеq:\n• «Aнi-iн грiр Okay»\n• «Write Aram I'm coming»\n• «Xelacis, ...»"
             )
             return
         await do_send(event, contact_name, message)
     except Exception as e:
         log.exception("Voice error")
-        await event.reply("⚠️ Ձայնի սխal: " + str(e))
+        await event.reply("⚠️ Ձայնի սխalб: " + str(e))
     finally:
         os.unlink(tmp_path)
 
@@ -557,6 +571,7 @@ async def main():
     log.info("Keep-alive target: %s", service_url)
 
     asyncio.create_task(keep_alive(service_url))
+    asyncio.create_task(cleanup_pending())
     asyncio.create_task(watchdog())
 
     await client.run_until_disconnected()
