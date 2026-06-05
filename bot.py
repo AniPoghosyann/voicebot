@@ -487,14 +487,14 @@ async def handle_voice(event):
         contact_name, message = parse_send(text)
         if contact_name is None:
             await event.reply(
-                "🤔 Հaskaца ձayнn, բayc hramaN чteса:\n\n"
-                "Асеq:\n• «Aнi-iн грiр Okay»\n• «Write Aram I'm coming»\n• «Xelacis, ...»"
+                "🤔 հասկացա ձայնը, բայց հրաման չտեսա:\n\n"
+                "Ասեք:\n• «Ani-ին գրիր Okay»\n• «Write Aram I'm coming»\n• «Xelacis, ...»"
             )
             return
         await do_send(event, contact_name, message)
     except Exception as e:
         log.exception("Voice error")
-        await event.reply("⚠️ Ձայնի սխalб: " + str(e))
+        await event.reply("⚠️ Ձայնի սխal: " + str(e))
     finally:
         os.unlink(tmp_path)
 
