@@ -133,16 +133,33 @@ def save_chats(chats):
 # ── Transcription ─────────────────────────────────────────────────────────────
 
 async def transcribe(ogg_path):
+    # Pass 1 — auto-detect language (no lock)
     with open(ogg_path, "rb") as f:
-        result = groq_client.audio.transcriptions.create(
+        detection = groq_client.audio.transcriptions.create(
             model="whisper-large-v3",
             file=f,
-            language="hy",
             response_format="verbose_json",
-            prompt="Արևելահայերեն։ Անի, Արամ, Մարի, գրիր, ուղարկիր, բարև, լավ եմ։"
+            prompt="Armenian, English, Russian. Names: Ani, Aram, Mari, Narek.",
         )
-    text = result.text.strip()
-    log.info(f"Whisper raw output: {text}")
+    detected_lang = (getattr(detection, "language", None) or "").lower()
+    log.info(f"Detected language: {detected_lang}")
+
+    # Pass 2 — if Armenian detected, re-run locked to hy for accuracy
+    if detected_lang in ("armenian", "hy"):
+        with open(ogg_path, "rb") as f:
+            result = groq_client.audio.transcriptions.create(
+                model="whisper-large-v3",
+                file=f,
+                language="hy",
+                response_format="verbose_json",
+                prompt="Արևելահայերեն։ Անի, Արամ, Մարի, գրիր, ուղարկիր, բարև, լավ եմ։",
+            )
+        text = result.text.strip()
+    else:
+        # English or Russian — first pass result is already correct
+        text = detection.text.strip()
+
+    log.info(f"Whisper output [{detected_lang}]: {text}")
     return text
 
 # ── Send pattern parsing ──────────────────────────────────────────────────────
@@ -259,17 +276,35 @@ async def cmd_add(event):
 async def cmd_remove(event):
     parts = event.raw_text.strip().split()
     if len(parts) < 2:
-        await event.reply("Օգտագործում: /remove Անուն")
+        await event.reply("Օգտագործում: /remove Անուն\nՕրինակ: /remove Ani կամ /remove Անի")
         return
-    name = " ".join(parts[1:]).capitalize()
+    # Join everything after /remove — supports multi-word names
+    raw_name = " ".join(parts[1:])
     contacts = load_contacts()
-    matched, _ = find_contact(name, contacts)
+    matched, entry = find_in_dict(raw_name, contacts)
+
+    # Multiple close matches — ask user to pick
+    if isinstance(entry, list):
+        await event.reply(
+            f"❓ «{to_latin(raw_name)}» — մի քանի նմանատիպ կոնտակտ:\n\n" +
+            "\n".join(f"{i+1}. {n}" for i, n in enumerate(entry)) +
+            "\n\nՊատասխանեք համարով կամ 0՝ չեղարկելու:"
+        )
+        pending_sends[event.chat_id] = {
+            "contacts": entry,
+            "message": "__remove__",
+            "contacts_keys": sorted(contacts.keys()),
+            "chats_keys": [],
+        }
+        return
+
     if matched:
         del contacts[matched]
         save_contacts(contacts)
         await event.reply(f"🗑️ {matched} ջնջված է")
     else:
-        await event.reply(f"❌ «{name}» չգտնվեց կոնտակտներում")
+        latin = to_latin(raw_name)
+        await event.reply(f"❌ «{latin}» չգտնվեց կոնտակտներում")
 
 async def cmd_help(event):
     await event.reply(
@@ -376,12 +411,22 @@ async def handle_message(event):
         chats    = load_chats()
 
         # Figure out if the chosen name is a contact or a chat
+        # Special action: remove
+        if message == "__remove__":
+            contacts = load_contacts()
+            if name in contacts:
+                del contacts[name]
+                save_contacts(contacts)
+                await event.reply(f"🗑️ {name} ջնջված է")
+            else:
+                await event.reply(f"❌ {name} չգտնվեց")
+            return
+
         if name in contacts:
             entry = contacts[name]
         elif name in chats:
             entry = chats[name]
         else:
-            # Fallback fuzzy search across both
             _, entry = find_in_dict(name, {**contacts, **chats})
 
         if entry and not isinstance(entry, list):
