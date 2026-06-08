@@ -75,14 +75,17 @@ Run this once locally to get your session string:
 from telethon.sync import TelegramClient
 from telethon.sessions import StringSession
 
-API_ID = "your_api_id"
+API_ID = your_api_id        # integer, no quotes
 API_HASH = "your_api_hash"
+PHONE = "+1234567890"
 
 with TelegramClient(StringSession(), API_ID, API_HASH) as client:
+    client.start(phone=PHONE)
+    print("Your session string:")
     print(client.session.save())
 ```
 
-Copy the printed string — that is your `TELEGRAM_SESSION` value.
+It will send a Telegram login code to your phone. After you enter it, the session string is printed to the terminal. Copy it — that is your `TELEGRAM_SESSION` value.
 
 ### 4. Set environment variables
 
@@ -152,9 +155,3 @@ When you say or type a name, the bot:
 - This is a userbot, meaning it runs as your personal Telegram account, not a bot account. Keep your session string private.
 - Contacts and chats are cached locally in `/tmp/contacts.json` and `/tmp/chats.json`. Run `/sync` and `/syncchats` after first deploy.
 - Voice messages must be sent to your own Saved Messages chat for the bot to process them.
-
----
-
-## License
-
-MIT
